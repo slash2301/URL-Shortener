@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/rs/zerolog/log"
 
+	"url-shortener/internal/cache"
 	"url-shortener/internal/config"
 	"url-shortener/internal/handler"
 	"url-shortener/internal/repository"
@@ -22,16 +23,14 @@ type Server struct {
 	cfg        *config.Config
 }
 
-func New(cfg *config.Config, db *pgxpool.Pool) *Server {
+func New(cfg *config.Config, db *pgxpool.Pool, redisCache *cache.RedisCache) *Server {
 	// Wire dependencies
-	repo    := repository.NewURLRepository(db)
-	svc     := service.NewURLService(repo, cfg.App.ShortCodeLen, cfg.App.BaseURL)
+	repo       := repository.NewURLRepository(db)
+	svc        := service.NewURLService(repo, redisCache, cfg.App.ShortCodeLen, cfg.App.BaseURL)
 	urlHandler := handler.NewURLHandler(svc)
 
-	// Router
 	r := chi.NewRouter()
 
-	// Global middleware
 	r.Use(middleware.RequestID)
 	r.Use(middleware.RealIP)
 	r.Use(middleware.Logger)
@@ -39,17 +38,15 @@ func New(cfg *config.Config, db *pgxpool.Pool) *Server {
 	r.Use(middleware.Timeout(30 * time.Second))
 	r.Use(corsMiddleware)
 
-	// Routes
 	r.Get("/health", handler.HealthCheck)
-
-	// Redirect route — must be at root level
 	r.Get("/{shortCode}", urlHandler.Redirect)
 
-	// API routes
 	r.Route("/api/v1", func(r chi.Router) {
 		r.Post("/shorten", urlHandler.Shorten)
 		r.Get("/analytics/{shortCode}", urlHandler.Analytics)
 	})
+
+	log.Info().Msg("Routes registered")
 
 	return &Server{
 		httpServer: &http.Server{
@@ -71,13 +68,11 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	return s.httpServer.Shutdown(ctx)
 }
 
-// Simple CORS middleware
 func corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
-
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
 			return
